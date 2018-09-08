@@ -12,6 +12,10 @@ module Pwsafe
       def not_authenticated
         DecodeError.new("need to check password first")
       end
+
+      def unexpected_eof
+        DecodeError.new("Unexpected End of file")
+      end
     end
   end
 end

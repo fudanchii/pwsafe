@@ -4,12 +4,16 @@ require "zweifische"
 module Pwsafe
   module V3
     class Decoder
+      include Pwsafe::Utils
+
       def initialize(filename = DEFAULT_PSAFE_FILE)
-        File.open(filename, "rb") do |f|
+        @filename = filename
+
+        File.open(@filename, "rb") do |f|
           assert_filetype(f.read(4))
 
           @salt = f.read(32) # 256 bit
-          @iteration = unpack_uint32(f)
+          @iteration = uint32(f.read(4))
           @p_hash = f.read(32)
           @b1b2 = f.read(32)
           @b3b4 = f.read(32)
@@ -22,15 +26,53 @@ module Pwsafe
         end
       end
 
-      def password_valid?(password)
+      def validate_password(password)
         reset_keys
         OpenSSL::Digest::SHA256
           .digest(stretch_key(password, @iteration))
           .eql?(@p_hash) || reset_keys
       end
 
+      def header
+        return @header.list if @header.populated?
+        list
+        @header.list
+      end
+
+      def list
+        return @fields.list if @fields.populated?
+
+        File.open(@filename, "rb") do |f|
+          f.pos = @c_pos
+
+          loop do # decode header
+            encblock = f.read(16)
+
+            if encblock.eql?(EOF) || encblock.empty?
+              raise DecodeError.unexpected_eof
+            end
+
+            chunk = decrypt_data(encblock)
+            @header.update_from_chunk(chunk)
+            break if @header.complete?
+          end
+
+          loop do # decode data
+            encblock = f.read(16)
+
+            break if encblock.eql?(EOF)
+            raise DecodeError.unexpected_eof if encblock.empty?
+
+            chunk = decrypt_data(encblock)
+            @fields.update_from_chunk(chunk)
+          end
+        end
+
+        @fields.list
+      end
+
       def debug(password)
-        puts "password : #{password_valid?(password).inspect}"
+        puts "password : #{validate_password(password).inspect}"
         puts "salt     : #{hxf @salt}"
         puts "iteration: #{@iteration}"
         puts "p_hash   : #{hxf @p_hash}"
@@ -43,6 +85,10 @@ module Pwsafe
         puts "iv       : #{hxf @iv}"
         puts "c_pos    : #{@c_pos}"
         puts "hmac     : #{hxf @hmac}"
+        puts ""
+        list.each { |f| puts "#{" " * (26 - f.label.length)}#{f.label}: #{f}" }
+
+        nil
       end
 
       private
@@ -55,24 +101,36 @@ module Pwsafe
         @L ||= decrypt_key(@b3b4)
       end
 
-      def decrypt_key(p)
+      def decrypt_data(block)
         raise DecodeError.not_authenticated unless @stretch_key
+        @tfd ||= Zweifische::Cipher256cbc.new(_k, @iv)
+        @tfd.decrypt_update(block)
+      end
+
+      def decrypt_key(p)
+        raise DecodeErrOr.not_authenticated unless @stretch_key
         @tfk ||= Zweifische::Cipher256ecb.new(@stretch_key)
         @tfk.decrypt(p)
       end
 
       def reset_keys
-        @tfk = @K = @L = nil
+        @tfd = @tfk = @K = @L = nil
+        reset_header
+        reset_data
         reset_stretch_key
+      end
+
+      def reset_header
+        @header = HeaderList.new
+      end
+
+      def reset_data
+        @fields = FieldList.new
       end
 
       def reset_stretch_key
         @stretch_key = nil
         false
-      end
-
-      def hxf(str)
-        str.unpack("H*").first
       end
 
       def stretch_key(str, iteration)
@@ -89,14 +147,6 @@ module Pwsafe
       def assert_filetype(tag)
         return if tag.eql?(TAG)
         raise DecodeError.wrong_type(self.class.name)
-      end
-
-      def unpack_uint32(file)
-        file
-          .read(4)
-          .unpack("V")
-          .first
-          .to_i
       end
     end
   end
