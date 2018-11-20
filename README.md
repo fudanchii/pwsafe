@@ -32,7 +32,7 @@ as a library:
 
 ```ruby
 pw = Pwsafe::V3::Decoder.new
-return unless pw.password_valid?(password)
+return unless pw.validate_password(password)
 puts pw.headers.inspect
 puts pw.fields.inspect
 ```
